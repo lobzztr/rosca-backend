@@ -1,8 +1,11 @@
 const path = require('path');
 const { google } = require('googleapis');
 
-// Load credentials from your downloaded JSON key file
-const credentials = require(path.join(__dirname, 'google-credentials.json'));
+// // Load credentials from your downloaded JSON key file
+// const credentials = require(path.join(__dirname, 'google-credentials.json'));
+
+// Parse the JSON string from the environment variable
+const credentials = JSON.parse(process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON);
 
 const auth = new google.auth.JWT(
   credentials.client_email,
