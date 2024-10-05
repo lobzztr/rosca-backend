@@ -310,3 +310,8 @@ app.use((err, req, res, next) => {
   console.error(err.stack);
   res.status(500).send('Something broke!');
 });
+
+// Uptime route
+app.get('/uptime', (req, res) => {
+  res.status(200).send('OK');
+});
