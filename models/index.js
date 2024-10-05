@@ -6,3 +6,5 @@ const ROSCA = mongoose.model('ROSCA', ROSCASchema);
 const UserROSCAStatus = mongoose.model('UserROSCAStatus', UserROSCAStatusSchema);
 
 module.exports = { User, ROSCA, UserROSCAStatus };
+
+// not the main index.js
