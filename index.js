@@ -15,7 +15,7 @@ const {
   getUserContributions 
 } = require('./contractInteraction');
 const { User, ROSCA, UserROSCAStatus } = require('./models');
-const MVP = require('./mvpSchema');  // Import the new MVP model
+const MVP = require('./mvpSchema');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -24,10 +24,38 @@ const port = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
+// Utility function for exponential backoff
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+const exponentialBackoff = async (retryCount) => {
+  const delay = Math.pow(2, retryCount) * 1000;
+  await sleep(delay);
+};
+
+// Retry function for database operations
+async function retryOperation(operation, maxRetries = 3) {
+  let retries = 0;
+  while (retries < maxRetries) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (error.name === 'MongooseError' && error.message.includes('buffering timed out')) {
+        console.log(`Retry attempt ${retries + 1} for database operation`);
+        await exponentialBackoff(retries);
+        retries++;
+      } else {
+        throw error;
+      }
+    }
+  }
+  throw new Error(`Operation failed after ${maxRetries} retries`);
+}
+
 // MongoDB connection
 mongoose.connect(process.env.MONGODB_URI, {
   useNewUrlParser: true,
   useUnifiedTopology: true,
+  serverSelectionTimeoutMS: 30000, // Increase timeout to 30 seconds
+  socketTimeoutMS: 45000, // Close sockets after 45 seconds of inactivity
 })
 .then(() => {
   console.log('Connected to MongoDB');
@@ -63,11 +91,13 @@ app.get('/api/roscaData', async (req, res) => {
         const currentRound = await getcurrentRound(rosca.contractAddress);
         const participants = await getParticipants(rosca.contractAddress);
         
-        // Update or create ROSCA document in MongoDB
-        const updatedRosca = await ROSCA.findOneAndUpdate(
-          { contractAddress: rosca.contractAddress },
-          { ...rosca, slots: slots !== null ? slots : undefined, currentRound, participants: participants || [] },
-          { new: true, upsert: true }
+        // Wrap the database operation in the retry function
+        const updatedRosca = await retryOperation(() => 
+          ROSCA.findOneAndUpdate(
+            { contractAddress: rosca.contractAddress },
+            { ...rosca, slots: slots !== null ? slots : undefined, currentRound, participants: participants || [] },
+            { new: true, upsert: true }
+          )
         );
         
         return updatedRosca;
@@ -91,11 +121,13 @@ app.get('/api/userData', async (req, res) => {
     
     const userData = await Promise.all(users.map(async (user) => {
       try {
-        // Update or create User document in MongoDB
-        const updatedUser = await User.findOneAndUpdate(
-          { walletAddress: user.walletAddress },
-          user,
-          { new: true, upsert: true }
+        // Wrap the database operation in the retry function
+        const updatedUser = await retryOperation(() => 
+          User.findOneAndUpdate(
+            { walletAddress: user.walletAddress },
+            user,
+            { new: true, upsert: true }
+          )
         );
         
         return updatedUser;
@@ -118,7 +150,7 @@ app.get('/api/roscaPaymentStatus/:contractAddress/:userAddress', async (req, res
     const { contractAddress, userAddress } = req.params;
     
     // Get ROSCA data from MongoDB
-    const rosca = await ROSCA.findOne({ contractAddress });
+    const rosca = await retryOperation(() => ROSCA.findOne({ contractAddress }));
     
     if (!rosca) {
       return res.status(404).json({ error: 'ROSCA not found', details: 'No ROSCA found with the given contract address' });
@@ -166,18 +198,20 @@ app.get('/api/roscaPaymentStatus/:contractAddress/:userAddress', async (req, res
     }
 
     // Update or create UserROSCAStatus document in MongoDB
-    const updatedStatus = await UserROSCAStatus.findOneAndUpdate(
-      { userAddress, contractAddress },
-      { 
-        userAddress,
-        contractAddress,
-        statuses: validStatuses,
-        participantWonRound,
-        hasWon,
-        userContributions,
-        lastUpdated: new Date()
-      },
-      { new: true, upsert: true }
+    const updatedStatus = await retryOperation(() => 
+      UserROSCAStatus.findOneAndUpdate(
+        { userAddress, contractAddress },
+        { 
+          userAddress,
+          contractAddress,
+          statuses: validStatuses,
+          participantWonRound,
+          hasWon,
+          userContributions,
+          lastUpdated: new Date()
+        },
+        { new: true, upsert: true }
+      )
     );
     
     res.json(updatedStatus);
@@ -193,7 +227,9 @@ app.get('/api/mvp/:walletAddress', async (req, res) => {
     const { walletAddress } = req.params;
 
     // Find the user
-    const user = await User.findOne({ walletAddress: { $regex: new RegExp(`^${walletAddress}$`, 'i') } });
+    const user = await retryOperation(() => 
+      User.findOne({ walletAddress: { $regex: new RegExp(`^${walletAddress}$`, 'i') } })
+    );
 
     if (!user) {
       return res.status(404).json({ 
@@ -203,15 +239,21 @@ app.get('/api/mvp/:walletAddress', async (req, res) => {
     }
 
     // Find all ROSCAs the user participates in
-    const roscas = await ROSCA.find({ participants: { $regex: new RegExp(`^${walletAddress}$`, 'i') } });
+    const roscas = await retryOperation(() => 
+      ROSCA.find({ participants: { $regex: new RegExp(`^${walletAddress}$`, 'i') } })
+    );
 
     const kuris = await Promise.all(roscas.map(async (rosca) => {
       const participants = await Promise.all(rosca.participants.map(async (participantAddress) => {
-        const participantUser = await User.findOne({ walletAddress: { $regex: new RegExp(`^${participantAddress}$`, 'i') } });
-        const userStatus = await UserROSCAStatus.findOne({
-          userAddress: { $regex: new RegExp(`^${participantAddress}$`, 'i') },
-          contractAddress: rosca.contractAddress
-        });
+        const participantUser = await retryOperation(() => 
+          User.findOne({ walletAddress: { $regex: new RegExp(`^${participantAddress}$`, 'i') } })
+        );
+        const userStatus = await retryOperation(() => 
+          UserROSCAStatus.findOne({
+            userAddress: { $regex: new RegExp(`^${participantAddress}$`, 'i') },
+            contractAddress: rosca.contractAddress
+          })
+        );
 
         const statuses = Array(rosca.slots).fill().map((_, index) => {
           const round = index + 1;
@@ -259,7 +301,6 @@ app.get('/api/mvp/:walletAddress', async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch MVP data', details: error.message });
   }
 });
-
 
 // Start server
 app.listen(port, () => {
